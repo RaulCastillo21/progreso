@@ -299,10 +299,56 @@ function defaultState() {
   };
 }
 const valid = s => s && Array.isArray(s.pillars) && s.pillars.length === 3 && Array.isArray(s.tasks) && Array.isArray(s.goals) && s.history && typeof s.history === 'object';
+
+// Sanea datos cargados o importados: solo se aceptan valores con formato conocido
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const cleanId = v => String(v ?? '').replace(/[^a-z0-9]/gi, '').slice(0, 32) || uid();
+const cleanStr = (v, max) => String(v ?? '').slice(0, max);
+const cleanDate = v => (typeof v === 'string' && DATE_RE.test(v) ? v : '');
+const cleanColor = v => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : PALETTE[0]);
+function sanitize(s) {
+  const out = defaultState();
+  out.onboarded = !!s.onboarded;
+  out.createdAt = cleanDate(s.createdAt) || todayKey();
+  out.pillars = s.pillars.map((p, i) => ({
+    id: cleanId(p && p.id),
+    name: cleanStr(p && p.name, 24) || DEFAULT_PILLARS[i].name,
+    emoji: firstGrapheme(p && p.emoji) || DEFAULT_PILLARS[i].emoji,
+    color: cleanColor(p && p.color),
+  }));
+  const pids = new Set(out.pillars.map(p => p.id));
+  const pid = v => (pids.has(v) ? v : out.pillars[0].id);
+  out.tasks = s.tasks.filter(t => t && typeof t === 'object').map(t => ({
+    id: cleanId(t.id), title: cleanStr(t.title, 80), pillarId: pid(t.pillarId), createdAt: cleanDate(t.createdAt),
+  }));
+  out.goals = s.goals.filter(g => g && typeof g === 'object').map(g => {
+    const progress = Math.max(0, Math.min(100, Math.round(Number(g.progress)) || 0));
+    return {
+      id: cleanId(g.id), title: cleanStr(g.title, 100), pillarId: pid(g.pillarId),
+      deadline: cleanDate(g.deadline), progress, done: progress >= 100,
+      doneAt: cleanDate(g.doneAt) || null, createdAt: cleanDate(g.createdAt),
+    };
+  });
+  for (const [k, h] of Object.entries(s.history)) {
+    if (!DATE_RE.test(k) || !h || typeof h !== 'object') continue;
+    out.history[k] = {
+      done: Array.isArray(h.done) ? h.done.map(cleanId) : [],
+      total: Math.max(0, Number(h.total) || 0),
+      complete: !!h.complete,
+    };
+  }
+  out.bestStreak = Math.max(0, Math.floor(Number(s.bestStreak)) || 0);
+  if (s.unlocked && typeof s.unlocked === 'object') {
+    const ids = new Set([...TROPHIES.map(t => 't' + t.d), ...LOGROS.map(l => l.id)]);
+    for (const [k, v] of Object.entries(s.unlocked)) if (ids.has(k) && DATE_RE.test(v)) out.unlocked[k] = v;
+  }
+  return out;
+}
+
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
-    if (valid(s)) return Object.assign(defaultState(), s);
+    if (valid(s)) return sanitize(s);
   } catch (e) {}
   return defaultState();
 }
@@ -672,7 +718,8 @@ $('#import-file').addEventListener('change', async e => {
     const s = JSON.parse(await file.text());
     if (!valid(s)) throw new Error('formato');
     if (!confirm('Esto reemplazará tus datos actuales por los de la copia. ¿Continuar?')) return;
-    state = Object.assign(defaultState(), s, { onboarded: true });
+    state = sanitize(s);
+    state.onboarded = true;
     save(); render(); toast('Copia restaurada');
   } catch (err) { toast('Archivo no válido'); }
 });
