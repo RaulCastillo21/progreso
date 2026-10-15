@@ -1,5 +1,5 @@
 // Network-first: siempre intenta la última versión y cae a caché sin conexión.
-const CACHE = 'progreso-v3';
+const CACHE = 'progreso-v4';
 const ASSETS = [
   './',
   './index.html',

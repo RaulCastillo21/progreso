@@ -97,6 +97,7 @@ h1{font-size:30px;letter-spacing:-.02em;font-weight:750}
 .once{display:block;font-size:11px;color:var(--ac2);font-weight:600;margin-top:2px;text-decoration:none}
 .task.locked{opacity:.55}
 .heat i[data-a]{cursor:pointer}
+.rep-note{font-size:13px;color:var(--ac2);margin-top:10px;font-weight:600}
 .wd.today i{border-color:var(--tx)}
 
 /* Tasks */
@@ -354,6 +355,10 @@ function sanitize(s) {
   out.tasks = s.tasks.filter(t => t && typeof t === 'object').map(t => {
     const task = { id: cleanId(t.id), title: cleanStr(t.title, 80), pillarId: pid(t.pillarId), createdAt: cleanDate(t.createdAt) };
     if (cleanDate(t.date)) task.date = t.date; // tarea puntual de un solo día
+    else if (Array.isArray(t.days)) { // días de la semana en que se repite (0 = domingo)
+      const days = [...new Set(t.days.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n <= 6))].sort();
+      if (days.length && days.length < 7) task.days = days;
+    }
     return task;
   });
   out.goals = s.goals.filter(g => g && typeof g === 'object').map(g => {
@@ -422,6 +427,9 @@ function restDaysAt(k) {
 const isScheduledRest = k => restDaysAt(k).includes(parseKey(k).getDay());
 const isRest = k => !!(state.history[k] && state.history[k].rest) || isScheduledRest(k);
 
+// Día libre: tienes tareas, pero ninguna programada para ese día
+const isFree = k => state.tasks.length > 0 && tasksFor(k).length === 0;
+
 // Recorre los días en orden: completo o descanso suma racha; el primer fallo de
 // cada semana (lunes a domingo) lo cubre la vida; el segundo rompe la racha.
 let A = null;
@@ -437,7 +445,7 @@ function analyze() {
     const k = dkey(d), wk = dkey(mondayOf(d));
     if (wk !== week) { week = wk; lifeUsed = false; }
     if (isComplete(k)) { streak++; days[k] = 'done'; }
-    else if (isRest(k)) { streak++; days[k] = 'rest'; }
+    else if (isRest(k) || isFree(k)) { streak++; days[k] = 'rest'; }
     else if (k === tk) days[k] = 'pending';
     else if (streak > 0 && !lifeUsed) { lifeUsed = true; saves++; days[k] = 'saved'; }
     else { streak = 0; days[k] = 'miss'; }
@@ -449,6 +457,13 @@ function analyze() {
 // ---------- Tareas por día ----------
 let viewDay = todayKey(); // día que se ve en la pestaña Hoy
 const recurring = () => state.tasks.filter(t => !t.date);
+const ALL_DAYS = [1, 2, 3, 4, 5, 6, 0]; // orden de lunes a domingo
+const appliesOn = (t, k) => !t.days || t.days.includes(parseKey(k).getDay());
+function scheduleLabel(t) {
+  if (t.date) return `Solo el ${fmtDate(t.date)}`;
+  if (!t.days) return 'Todos los días';
+  return ALL_DAYS.filter(n => t.days.includes(n)).map(n => WD[n]).join(' · ');
+}
 
 // Tareas de un día: las diarias que tocaban ese día + las puntuales de esa fecha.
 // Hoy (y días sin registro) usan la lista actual; los días pasados guardan su lista en ids.
@@ -456,6 +471,7 @@ function tasksFor(k) {
   const h = state.history[k];
   let rec = recurring();
   if (k !== todayKey() && h && Array.isArray(h.ids)) rec = rec.filter(t => h.ids.includes(t.id));
+  else rec = rec.filter(t => appliesOn(t, k));
   return [...rec, ...state.tasks.filter(t => t.date === k)];
 }
 const dayEntry = k => state.history[k] || (state.history[k] = { done: [], total: 0, complete: false });
@@ -464,7 +480,7 @@ const dayEntry = k => state.history[k] || (state.history[k] = { done: [], total:
 function recomputeDay(k) {
   const h = state.history[k];
   if (!h) return;
-  if (k === todayKey() || !Array.isArray(h.ids)) h.ids = recurring().map(t => t.id);
+  if (k === todayKey() || !Array.isArray(h.ids)) h.ids = recurring().filter(t => appliesOn(t, k)).map(t => t.id);
   const list = tasksFor(k), ids = new Set(list.map(t => t.id));
   h.done = h.done.filter(id => ids.has(id));
   h.total = list.length;
@@ -593,7 +609,8 @@ function viewToday() {
   if (isFuture) hint = `<div class="hint">📅 Día futuro: puedes añadir tareas solo para este día o marcarlo como descanso.</div>`;
   else if (complete) hint = `<div class="hint win">✅ Día completado.${isToday ? ' Vuelve mañana para sumar otro punto de racha.' : ''}</div>`;
   else if (rest) hint = `<div class="hint rest">😴 ${isToday ? 'Hoy es' : 'Fue'} día de descanso. Cuenta como completado: descansar también es parte del plan.</div>`;
-  else if (isPast) hint = `<div class="hint">✏️ Estás editando un día pasado${st === 'saved' ? ' (cubierto con tu vida 💔)' : st === 'miss' ? ' (fallado)' : ''}. Marca lo que hiciste: tu racha se recalcula al momento.</div>`;
+  else if (isPast && total) hint = `<div class="hint">✏️ Estás editando un día pasado${st === 'saved' ? ' (cubierto con tu vida 💔)' : st === 'miss' ? ' (fallado)' : ''}. Marca lo que hiciste: tu racha se recalcula al momento.</div>`;
+  else if (!total && state.tasks.length) hint = `<div class="hint rest">🌿 Día libre: no tienes tareas programadas. Cuenta como completado.</div>`;
   else if (!total) hint = '';
   else if (streak > 0) hint = `<div class="hint">Te faltan ${plural(total - done, 'tarea', 'tareas')} para sumar a tu racha de ${plural(streak, 'día', 'días')}. ${S.lifeAvailable ? 'Si hoy fallas, gastarás tu vida de la semana.' : '<b style="color:var(--danger)">Ya usaste tu vida esta semana: si fallas, pierdes la racha.</b>'}</div>`;
   else hint = `<div class="hint">Completa todas tus tareas de hoy para empezar una racha.</div>`;
@@ -612,7 +629,7 @@ function viewToday() {
       <div class="ghead" style="--c:${p.color}"><span class="dot"></span>${esc(p.emoji)} ${esc(p.name)}<small>${dn}/${ts.length}</small></div>
       ${ts.map(t => {
         const ok = h.done.includes(t.id);
-        const tag = t.date ? '<small class="once">Solo este día</small>' : '';
+        const tag = t.date ? '<small class="once">Solo este día</small>' : t.days ? `<small class="once">${scheduleLabel(t)}</small>` : '';
         return `<div class="task-row"><button class="task ${ok ? 'done' : ''} ${isFuture ? 'locked' : ''}" data-a="toggle" data-id="${t.id}" style="--c:${p.color}" aria-pressed="${ok}"><span class="check">${CHECK}</span><span class="tt">${esc(t.title)}${tag}</span></button><button class="task-edit" data-a="edit-task" data-id="${t.id}" aria-label="Editar tarea">⋯</button></div>`;
       }).join('')}
     </div>`;
@@ -665,14 +682,14 @@ function viewPillars() {
   return `<header class="top"><div><div class="eyebrow">Tu sistema</div><h1>Pilares</h1></div></header>
   ${state.pillars.map(p => {
     const goals = state.goals.filter(g => g.pillarId === p.id).sort((a, b) => a.done - b.done);
-    const tasks = recurring().filter(t => t.pillarId === p.id);
+    const tasks = state.tasks.filter(t => t.pillarId === p.id && (!t.date || t.date >= todayKey()));
     return `<section class="pcard" style="--c:${p.color}">
       <header><span class="pe">${esc(p.emoji)}</span><div><h2>${esc(p.name)}</h2><small>${plural(goals.length, 'objetivo', 'objetivos')} · ${plural(tasks.length, 'tarea diaria', 'tareas diarias')}</small></div></header>
       <div class="pbody">
         <div class="sub"><h3>Objetivos a largo plazo</h3><button data-a="add-goal" data-p="${p.id}">+ Añadir</button></div>
         ${goals.length ? goals.map(goalItem).join('') : '<div class="none">Sin objetivos todavía.</div>'}
         <div class="sub"><h3>Tareas diarias</h3><button data-a="add-task" data-p="${p.id}">+ Añadir</button></div>
-        ${tasks.length ? tasks.map(t => `<button class="item" data-a="edit-task" data-id="${t.id}"><div class="row"><span class="tdot"></span><b>${esc(t.title)}</b><span class="pct">Editar</span></div></button>`).join('') : '<div class="none">Sin tareas diarias todavía.</div>'}
+        ${tasks.length ? tasks.map(t => `<button class="item" data-a="edit-task" data-id="${t.id}"><div class="row"><span class="tdot"></span><b>${esc(t.title)}</b><span class="pct">Editar</span></div><div class="meta">${t.date ? '📌' : '🔁'} ${scheduleLabel(t)}</div></button>`).join('') : '<div class="none">Sin tareas todavía.</div>'}
       </div>
     </section>`;
   }).join('')}`;
@@ -753,6 +770,7 @@ function viewSettings() {
     <p>❤️ Tienes <b>1 vida por semana</b>: puedes fallar un día sin perder la racha. Se recupera cada lunes y no se acumula.</p>
     <p>💔 Si fallas <b>dos días en la misma semana</b> (lunes a domingo), la racha vuelve a 0.</p>
     <p>😴 Los <b>días de descanso</b> cuentan como completados.</p>
+    <p>🌿 Los días en que no tienes <b>ninguna tarea programada</b> cuentan como libres (completados).</p>
   </div>
   <div class="sec-h"><h2>Tus datos</h2></div>
   <button class="setting" data-a="export"><span class="ic">⬇️</span><div><b>Exportar copia de seguridad</b><small>Descarga un archivo con todo tu progreso</small></div></button>
@@ -790,37 +808,39 @@ function pillarPicker(pid) {
   return `<div class="fld"><span>Pilar</span><div class="chips">${state.pillars.map(p => `<label class="chip" style="--c:${p.color}"><input type="radio" name="pillar" value="${p.id}" ${p.id === pid ? 'checked' : ''}><span>${esc(p.emoji)} ${esc(p.name)}</span></label>`).join('')}</div></div>`;
 }
 
-// day: fecha desde la que se abre (pestaña Hoy) para poder crear tareas de un solo día
+// day: fecha desde la que se abre (pestaña Hoy). Sin días marcados la tarea es solo para ese día.
 function taskSheet(task, pillarId, day) {
   const isNew = !task;
   const pid = task ? task.pillarId : (pillarId || state.pillars[0].id);
-  const onceDay = (task && task.date) || day;
-  const repeat = onceDay ? `<div class="fld"><span>Repetición</span><div class="chips">
-      <label class="chip" style="--c:var(--ac)"><input type="radio" name="repeat" value="daily" ${task && task.date ? '' : 'checked'}><span>🔁 Todos los días</span></label>
-      <label class="chip" style="--c:var(--ac)"><input type="radio" name="repeat" value="once" ${task && task.date ? 'checked' : ''}><span>📌 Solo el ${esc(fmtDate(onceDay))}</span></label>
-    </div></div>` : '';
+  const onceDay = (task && task.date) || day || todayKey();
+  const sel = task && !task.date ? (task.days || ALL_DAYS) : [];
   openSheet(isNew ? 'Nueva tarea' : 'Editar tarea', `
     <label class="fld"><span>Tarea</span><input type="text" name="title" required maxlength="80" placeholder="Ej: 30 min de ejercicio" value="${esc(task ? task.title : '')}"></label>
     ${pillarPicker(pid)}
-    ${repeat}
+    <div class="fld"><div class="range-h"><span style="font-size:13px;color:var(--mu);font-weight:550">Repetir</span><button type="button" class="link" data-all style="padding:0">Todos</button></div>
+      <div class="chips days" style="margin-top:8px">${ALL_DAYS.map(n => `<label class="chip" style="--c:var(--ac)"><input type="checkbox" name="rd" value="${n}" ${sel.includes(n) ? 'checked' : ''}><span>${WD[n]}</span></label>`).join('')}</div>
+      <div class="rep-note"></div>
+    </div>
     <div class="row-btns">${isNew ? '<button type="button" class="btn ghost" data-a="close-sheet">Cancelar</button>' : '<button type="button" class="btn ghost danger" data-del>Eliminar</button>'}<button class="btn primary">${isNew ? 'Añadir' : 'Guardar'}</button></div>`, {
     onSubmit: f => {
       const title = String(f.get('title')).trim();
       if (!title) return false;
       const pillarId = f.get('pillar') || pid;
-      const once = onceDay && f.get('repeat') === 'once';
+      const days = f.getAll('rd').map(Number);
       const t = task || { id: uid(), createdAt: todayKey() };
       Object.assign(t, { title, pillarId });
-      if (once) t.date = onceDay; else delete t.date;
+      delete t.date; delete t.days;
+      if (!days.length) t.date = onceDay;
+      else if (days.length < 7) t.days = days.sort();
       if (isNew) state.tasks.push(t);
-      // Una tarea diaria creada desde un día pasado también cuenta para ese día
-      if (!once && day && day < todayKey()) {
+      // Una tarea repetida creada desde un día pasado también cuenta para ese día
+      if (!t.date && day && day < todayKey() && appliesOn(t, day)) {
         const h = dayEntry(day);
         if (!Array.isArray(h.ids)) recomputeDay(day);
         if (!h.ids.includes(t.id)) h.ids.push(t.id);
       }
       recomputeVisible(); save(); render(); checkUnlocks();
-      toast(isNew ? (once ? 'Tarea añadida a este día' : 'Tarea diaria añadida') : 'Tarea guardada');
+      toast(isNew ? (t.date ? (t.date === todayKey() ? 'Tarea añadida a hoy' : 'Tarea añadida a ese día') : `Tarea añadida · ${scheduleLabel(t)}`) : 'Tarea guardada');
     },
     onMount: form => {
       const del = form.querySelector('[data-del]');
@@ -829,6 +849,19 @@ function taskSheet(task, pillarId, day) {
         state.tasks = state.tasks.filter(t => t !== task);
         recomputeVisible(); save(); closeSheet(); render(); checkUnlocks();
       });
+      const boxes = [...form.querySelectorAll('input[name=rd]')], note = form.querySelector('.rep-note');
+      const upd = () => {
+        const d = boxes.filter(b => b.checked).map(b => Number(b.value));
+        note.textContent = !d.length ? `📌 Solo ${onceDay === todayKey() ? 'hoy' : 'el ' + fmtDate(onceDay)}`
+          : d.length === 7 ? '🔁 Todos los días' : `🔁 Cada ${ALL_DAYS.filter(n => d.includes(n)).map(n => WD[n]).join(', ')}`;
+      };
+      boxes.forEach(b => b.addEventListener('change', upd));
+      form.querySelector('[data-all]').addEventListener('click', () => {
+        const all = boxes.every(b => b.checked);
+        boxes.forEach(b => { b.checked = !all; });
+        upd();
+      });
+      upd();
       if (isNew) setTimeout(() => form.title.focus(), 330);
     },
   });
